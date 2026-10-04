@@ -151,6 +151,8 @@ window.fetch = async function(resource, options) {
 
 // Godot calls preloadFile(pack, pack) before starting. Give its normal preloader
 // the reassembled ArrayBuffer so the virtual filesystem receives the correct PCK.
+const engine = new Engine(GODOT_CONFIG);
+
 const originalPreloadFile = engine.preloadFile.bind(engine);
 engine.preloadFile = function(file, path) {
     if (file !== splitPackName) return originalPreloadFile(file, path);
