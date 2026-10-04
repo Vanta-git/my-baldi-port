@@ -113,56 +113,50 @@ body {
 		<script>
 const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":true,"executable":"Baldi's Basics Godot","experimentalVK":false,"fileSizes":{"Baldi's Basics Godot.pck":74636128,"Baldi's Basics Godot.wasm":36160334},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
 const GODOT_THREADS_ENABLED = false;
-// Reassemble split WASM parts transparently before Godot requests the engine binary.
+// Serve the split WASM as one virtual file when Godot requests the original filename.
 const splitWasmName = "Baldi's Basics Godot.wasm";
 const splitWasmPartCount = 13;
+const splitPackName = "Baldi's Basics Godot.pck";
+const splitPackPartCount = 25;
 const nativeFetch = window.fetch.bind(window);
+
+async function joinSplitParts(filename, count, options) {
+    const responses = await Promise.all(Array.from({ length: count }, async (_, index) => {
+        const partName = filename + '.part' + String(index + 1).padStart(2, '0');
+        const response = await nativeFetch(new URL(partName, document.baseURI).href, options);
+        if (!response.ok) throw new Error('Failed loading ' + partName + ' (' + response.status + ')');
+        return response.arrayBuffer();
+    }));
+    const total = responses.reduce((sum, buffer) => sum + buffer.byteLength, 0);
+    const combined = new Uint8Array(total);
+    let offset = 0;
+    for (const buffer of responses) {
+        combined.set(new Uint8Array(buffer), offset);
+        offset += buffer.byteLength;
+    }
+    return combined.buffer;
+}
+
 window.fetch = async function(resource, options) {
-    const url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
-    let pathname = url;
-    try { pathname = new URL(url, window.location.href).pathname; } catch (_) {}
-    if (pathname.endsWith('/' + splitWasmName) || pathname === splitWasmName || pathname.endsWith("Baldi%27s%20Basics%20Godot.wasm")) {
-        const buffers = await Promise.all(Array.from({length: splitWasmPartCount}, (_, index) => {
-            const part = splitWasmName + '.part' + String(index + 1).padStart(2, '0');
-            return nativeFetch(part, options).then(response => {
-                if (!response.ok) throw new Error('Failed loading ' + part + ' (' + response.status + ')');
-                return response.arrayBuffer();
-            });
-        }));
-        const total = buffers.reduce((sum, buffer) => sum + buffer.byteLength, 0);
-        const combined = new Uint8Array(total);
-        let offset = 0;
-        for (const buffer of buffers) { combined.set(new Uint8Array(buffer), offset); offset += buffer.byteLength; }
-        return new Response(combined, {status: 200, headers: {'Content-Type': 'application/wasm', 'Content-Length': String(total)}});
+    const rawUrl = typeof resource === 'string' ? resource : (resource && resource.url) || '';
+    let pathname = rawUrl;
+    try { pathname = decodeURIComponent(new URL(rawUrl, document.baseURI).pathname); } catch (_) {}
+    const cleanPath = pathname.replace(/\\/g, '/');
+    if (cleanPath.endsWith('/' + splitWasmName) || cleanPath === splitWasmName) {
+        const buffer = await joinSplitParts(splitWasmName, splitWasmPartCount, options);
+        return new Response(buffer, { status: 200, headers: { 'Content-Type': 'application/wasm', 'Content-Length': String(buffer.byteLength) } });
     }
     return nativeFetch(resource, options);
 };
 
-const engine = new Engine(GODOT_CONFIG);
-
-const splitPackName = "Baldi's Basics Godot.pck";
+// Godot calls preloadFile(pack, pack) before starting. Give its normal preloader
+// the reassembled ArrayBuffer so the virtual filesystem receives the correct PCK.
 const originalPreloadFile = engine.preloadFile.bind(engine);
 engine.preloadFile = function(file, path) {
     if (file !== splitPackName) return originalPreloadFile(file, path);
-    const count = 25;
-    const parts = Array.from({length: count}, (_, index) => {
-        const partName = `${splitPackName}.part${String(index + 1).padStart(2, '0')}`;
-        return fetch(partName).then(response => {
-            if (!response.ok) throw new Error(`Failed loading ${partName}`);
-            return response.arrayBuffer();
-        });
-    });
-    return Promise.all(parts).then(async buffers => {
-        const total = buffers.reduce((sum, buffer) => sum + buffer.byteLength, 0);
-        const combined = new Uint8Array(total);
-        let offset = 0;
-        for (const buffer of buffers) {
-            combined.set(new Uint8Array(buffer), offset);
-            offset += buffer.byteLength;
-        }
-        await engine.init(engine.config.executable);
-        engine.copyToFS(path || splitPackName, combined.buffer);
-    });
+    return joinSplitParts(splitPackName, splitPackPartCount).then(buffer =>
+        originalPreloadFile(buffer, path || splitPackName)
+    );
 };
 
 (function () {
